@@ -1,6 +1,9 @@
 package com.whattowatch.tv
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -23,6 +26,7 @@ class TypeSearchService : AccessibilityService() {
         var clickedSearch = false
         var busy = false
         var lastClick = 0L
+        var homeTries = 0
     }
 
     companion object {
@@ -31,6 +35,17 @@ class TypeSearchService : AccessibilityService() {
         @Volatile var inspectUntil: Long = 0
         @Volatile var lastDump: String = ""
         private val dumps = LinkedHashMap<String, String>()
+
+        /** What the helper did on the last few Watch presses (shown on the test screen). */
+        private val logLines = ArrayDeque<String>()
+        @Volatile var logText: String = ""
+        fun log(msg: String) {
+            synchronized(logLines) {
+                logLines.addLast(msg)
+                while (logLines.size > 14) logLines.removeFirst()
+                logText = logLines.joinToString("\n")
+            }
+        }
 
         fun startInspect(pkg: String) {
             synchronized(dumps) { dumps.clear() }
@@ -49,6 +64,7 @@ class TypeSearchService : AccessibilityService() {
         }
 
         fun request(pkg: String, title: String, isTv: Boolean) {
+            log("— Watch: \"$title\" (${if (isTv) "TV show" else "movie"})")
             pending = Pending(pkg, title, isTv, System.currentTimeMillis() + if (isTv) 30_000 else 20_000)
         }
     }
@@ -73,6 +89,7 @@ class TypeSearchService : AccessibilityService() {
 
         val p = pending ?: return
         if (System.currentTimeMillis() > p.until) {
+            log("Gave up after timeout on $screenName")
             pending = null
             return
         }
@@ -127,16 +144,35 @@ class TypeSearchService : AccessibilityService() {
         return best
     }
 
+    private fun label(n: AccessibilityNodeInfo) =
+        (n.text ?: n.contentDescription ?: n.viewIdResourceName?.substringAfterLast('/') ?: "?").toString().take(30)
+
+    /** A real tap on the screen where the node is — works when accessibility clicks are ignored. */
+    private fun tap(node: AccessibilityNodeInfo): Boolean {
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        if (r.isEmpty) return false
+        val path = Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()) }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+            .build()
+        return dispatchGesture(g, null, null)
+    }
+
     private fun byId(nodes: List<AccessibilityNodeInfo>, idEnd: String) =
         nodes.firstOrNull { it.viewIdResourceName?.endsWith(idEnd) == true }
 
     private fun pressed(p: Pending, node: AccessibilityNodeInfo?): Boolean {
-        if (node == null || !click(node)) return false
+        if (node == null) return false
+        val ok = click(node)
+        log("[$screenName] pressed \"${label(node)}\" ${if (ok) "" else "(click refused)"}")
+        if (!ok) return false
         p.lastClick = System.currentTimeMillis()
         return true
     }
 
     private fun back(p: Pending) {
+        log("[$screenName] wrong section, pressing Back")
         performGlobalAction(GLOBAL_ACTION_BACK)
         p.lastClick = System.currentTimeMillis()
     }
@@ -178,9 +214,26 @@ class TypeSearchService : AccessibilityService() {
 
         if (!p.isTv) return true // movies: the normal steps below handle it
 
-        // Home screen: press the TV Series / TV Shows tile.
-        if (pressed(p, findTvTab(nodes))) return false
-        return true // nothing recognisable: try the normal steps (search button / text box)
+        // Home screen: press the TV Series / TV Shows tile. First a normal accessibility click;
+        // if we're still here afterwards, tap it on screen like a finger would.
+        val tile = findTvTab(nodes)
+        if (tile == null) {
+            log("[$screenName] no TV Series button found")
+            return true // nothing recognisable: try the normal steps (search button / text box)
+        }
+        when (p.homeTries++) {
+            0 -> if (!pressed(p, tile)) { tap(tile); p.lastClick = System.currentTimeMillis() }
+            1, 2 -> {
+                val ok = tap(tile)
+                log("[$screenName] tapped \"${label(tile)}\" on screen ${if (ok) "" else "(tap refused)"}")
+                p.lastClick = System.currentTimeMillis()
+            }
+            else -> {
+                log("[$screenName] TV Series button doesn't respond; giving up")
+                pending = null
+            }
+        }
+        return false
     }
 
     private fun openMain(pkg: String) {
@@ -223,6 +276,7 @@ class TypeSearchService : AccessibilityService() {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, p.title)
             }
             if (field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                log("[$screenName] typed the title into the search box")
                 handler.postDelayed({
                     if (Build.VERSION.SDK_INT >= 30) {
                         field.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
@@ -248,7 +302,7 @@ class TypeSearchService : AccessibilityService() {
         // 3. No search box yet: press the app's Search button once, then look again.
         if (!p.clickedSearch) {
             val btn = nodes.firstOrNull { it.words().contains("search", ignoreCase = true) }
-            if (btn != null && click(btn)) p.clickedSearch = true
+            if (btn != null && pressed(p, btn)) p.clickedSearch = true
         }
     }
 

@@ -177,9 +177,11 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
     val activities = remember(pkg) { Apps.allActivities(ctx, pkg) }
     val current = remember(version) { store.method(slot) }
     var dump by remember { mutableStateOf(TypeSearchService.lastDump) }
+    var helperLog by remember { mutableStateOf(TypeSearchService.logText) }
     LaunchedEffect(Unit) {
         while (true) {
             dump = TypeSearchService.lastDump
+            helperLog = TypeSearchService.logText
             delay(1000)
         }
     }
@@ -241,12 +243,16 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
             Spacer(Modifier.height(12.dp))
             Text("Troubleshooting", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Text(
-                "Press Inspect: $appName opens. Go into TV Shows and open its search. Wait 3 seconds on each screen, then press the Home button and reopen What To Watch. Take a photo of the text that appears below. (Recording lasts 2 minutes.)",
+                "Press Inspect: $appName opens on its home screen. Wait 3 seconds there, then go into TV Series and open its search. Wait 3 seconds on each screen, then press the Home button and reopen What To Watch. Take a photo of the text that appears below. (Recording lasts 2 minutes.)",
                 color = Muted, fontSize = 15.sp, modifier = Modifier.padding(vertical = 6.dp),
             )
             TvButton("Inspect $appName screens") {
                 if (!TypeSearchService.isEnabled(ctx)) toast("Turn on the search typing helper first")
                 else Apps.inspect(ctx, pkg)
+            }
+            if (helperLog.isNotEmpty()) {
+                Text("Helper log (last Watch presses):", color = Gold, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+                Text(helperLog, color = Color.White, fontSize = 11.sp, lineHeight = 13.sp)
             }
             if (dump.isNotEmpty()) {
                 val parts = dump.split("\n\n")
