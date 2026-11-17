@@ -65,7 +65,7 @@ class TypeSearchService : AccessibilityService() {
 
         fun request(pkg: String, title: String, isTv: Boolean) {
             log("— Watch: \"$title\" (${if (isTv) "TV show" else "movie"})")
-            pending = Pending(pkg, title, isTv, System.currentTimeMillis() + if (isTv) 30_000 else 20_000)
+            pending = Pending(pkg, title, isTv, System.currentTimeMillis() + if (isTv) 90_000 else 20_000)
         }
     }
 
@@ -217,9 +217,11 @@ class TypeSearchService : AccessibilityService() {
         // Home screen: press the TV Series / TV Shows tile. First a normal accessibility click;
         // if we're still here afterwards, tap it on screen like a finger would.
         val tile = findTvTab(nodes)
-        if (tile == null) {
-            log("[$screenName] no TV Series button found")
-            return true // nothing recognisable: try the normal steps (search button / text box)
+        if (tile == null || p.homeTries > 2) {
+            // Can't get in by ourselves: wait for you to open TV Series → Search, then type.
+            if (p.homeTries <= 3) log("[$screenName] waiting for you to open TV Series → Search")
+            p.homeTries = 4
+            return false
         }
         when (p.homeTries++) {
             0 -> if (!pressed(p, tile)) { tap(tile); p.lastClick = System.currentTimeMillis() }
@@ -228,10 +230,7 @@ class TypeSearchService : AccessibilityService() {
                 log("[$screenName] tapped \"${label(tile)}\" on screen ${if (ok) "" else "(tap refused)"}")
                 p.lastClick = System.currentTimeMillis()
             }
-            else -> {
-                log("[$screenName] TV Series button doesn't respond; giving up")
-                pending = null
-            }
+            else -> {}
         }
         return false
     }

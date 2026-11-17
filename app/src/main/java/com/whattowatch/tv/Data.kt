@@ -324,7 +324,8 @@ object Apps {
         if (!opened) return "Couldn't open that app. Pick it again in Settings."
         if (helper) {
             TypeSearchService.request(pkg, title, isTv)
-            return "Typing \"$title\"…"
+            return if (isTv) "Opening TV Series for \"$title\"… if it stops at the home screen, press TV Series → Search and it will type the name"
+            else "Typing \"$title\"…"
         }
         return "Search for: $title"
     }
