@@ -87,6 +87,7 @@ sealed class Screen {
     data object Settings : Screen()
     data class Details(val title: Title) : Screen()
     data class PickApp(val slot: Int) : Screen()
+    data class TestApp(val slot: Int) : Screen()
 }
 
 @Composable
@@ -177,7 +178,16 @@ fun App(store: Store) {
                 store = store,
                 version = version,
                 onPickApp = { push(Screen.PickApp(it)) },
+                onTest = { push(Screen.TestApp(it)) },
                 onClear = { store.clearAll(); changed(); toast("My List and watched history cleared") },
+            )
+
+            is Screen.TestApp -> TestAppScreen(
+                slot = s.slot,
+                store = store,
+                version = version,
+                onChanged = changed,
+                toast = toast,
             )
 
             is Screen.PickApp -> PickAppScreen(slot = s.slot) { pkg ->
@@ -417,7 +427,7 @@ fun Details(
     }
 
     fun watch(slot: Int, pkg: String?) {
-        if (pkg == null) onPickApp(slot) else toast(Apps.open(ctx, pkg, t.name))
+        if (pkg == null) onPickApp(slot) else toast(Apps.open(ctx, pkg, t.name, store.method(slot)))
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -513,7 +523,13 @@ fun SearchScreen(onOpen: (Title) -> Unit) {
 // ---------- Settings ----------
 
 @Composable
-fun SettingsScreen(store: Store, version: Int, onPickApp: (Int) -> Unit, onClear: () -> Unit) {
+fun SettingsScreen(
+    store: Store,
+    version: Int,
+    onPickApp: (Int) -> Unit,
+    onTest: (Int) -> Unit,
+    onClear: () -> Unit,
+) {
     val ctx = LocalContext.current
     val app1 = remember(version) { store.vodApp(1)?.let { Apps.label(ctx, it) } ?: "Not chosen" }
     val app2 = remember(version) { store.vodApp(2)?.let { Apps.label(ctx, it) } ?: "Not chosen" }
@@ -528,9 +544,15 @@ fun SettingsScreen(store: Store, version: Int, onPickApp: (Int) -> Unit, onClear
     ) {
         Text("Settings", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Text("Main VOD app (the big Watch button): $app1", color = Muted, fontSize = 17.sp)
-        TvButton("Choose main VOD app", modifier = Modifier.focusRequester(fr)) { onPickApp(1) }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TvButton("Choose main VOD app", modifier = Modifier.focusRequester(fr)) { onPickApp(1) }
+            TvButton("Test movie hand-off") { if (store.vodApp(1) != null) onTest(1) else onPickApp(1) }
+        }
         Text("Second VOD app: $app2", color = Muted, fontSize = 17.sp)
-        TvButton("Choose second VOD app") { onPickApp(2) }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TvButton("Choose second VOD app") { onPickApp(2) }
+            TvButton("Test movie hand-off") { if (store.vodApp(2) != null) onTest(2) else onPickApp(2) }
+        }
         Spacer(Modifier.height(12.dp))
         TvButton("Clear My List and watched history", onClick = onClear)
         Text(
@@ -563,6 +585,80 @@ fun PickAppScreen(slot: Int, onPick: (String) -> Unit) {
                     modifier = if (a == apps.first()) Modifier.focusRequester(fr) else Modifier,
                 ) { onPick(a.pkg) }
             }
+        }
+    }
+}
+
+// ---------- Hand-off test ----------
+
+@Composable
+fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, toast: (String) -> Unit) {
+    val ctx = LocalContext.current
+    val pkg = store.vodApp(slot) ?: return
+    val appName = remember(pkg) { Apps.label(ctx, pkg) }
+    var title by remember { mutableStateOf("Inception") }
+    val methods = remember(pkg, title) { Apps.methods(ctx, pkg, title) }
+    val activities = remember(pkg) { Apps.allActivities(ctx, pkg) }
+    val current = remember(version) { store.method(slot) }
+    val fr = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(100)
+        runCatching { fr.requestFocus() }
+    }
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(48.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Text("Test movie hand-off: $appName", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "Press Try on each one. If $appName opens showing the movie below, come back and press Use this.",
+                color = Muted, fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp),
+            )
+            Text(
+                "Now using: ${current ?: "Just open the app"}",
+                color = Accent, fontSize = 16.sp, modifier = Modifier.padding(vertical = 8.dp),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Test movie:  ", color = Muted, fontSize = 18.sp)
+                BasicTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
+                    cursorBrush = SolidColor(Color.White),
+                    modifier = Modifier
+                        .focusRequester(fr)
+                        .width(320.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Field)
+                        .padding(12.dp),
+                )
+            }
+        }
+        if (methods.isEmpty()) {
+            item { Message("$appName doesn't accept any of the usual hand-off requests.") }
+        }
+        items(methods, key = { it.first }) { (label, intent) ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(label, color = Color.White, fontSize = 17.sp, modifier = Modifier.width(360.dp))
+                TvButton("Try") { if (!Apps.launch(ctx, intent)) toast("That one failed to open") }
+                TvButton(if (current == label) "✓ Using" else "Use this") {
+                    store.setMethod(slot, label); onChanged(); toast("Saved")
+                }
+            }
+        }
+        item {
+            TvButton("Use: just open the app") { store.setMethod(slot, null); onChanged(); toast("Saved") }
+        }
+        item {
+            Text(
+                "App screens found (for troubleshooting): " +
+                    activities.joinToString(", ") { it.substringAfterLast('.') }.ifEmpty { "none visible" },
+                color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 16.dp),
+            )
         }
     }
 }

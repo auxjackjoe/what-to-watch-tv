@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -188,7 +189,11 @@ class Store(ctx: Context) {
     }
 
     fun vodApp(slot: Int): String? = p.getString("app$slot", null)
-    fun setVodApp(slot: Int, pkg: String) = p.edit().putString("app$slot", pkg).apply()
+    fun setVodApp(slot: Int, pkg: String) =
+        p.edit().putString("app$slot", pkg).remove("method$slot").apply()
+
+    fun method(slot: Int): String? = p.getString("method$slot", null)
+    fun setMethod(slot: Int, m: String?) = p.edit().putString("method$slot", m).apply()
 }
 
 // ---------- Opening your VOD apps ----------
@@ -214,22 +219,64 @@ object Apps {
         pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
     }.getOrDefault(pkg)
 
+    private val extraKeys = listOf(
+        SearchManager.QUERY, "QUERY", "keyword", "keywords", "search", "searchText", "search_text",
+        "searchKey", "search_key", "key", "q", "title", "name", "user_query", "android.intent.extra.TEXT",
+    )
+
+    private fun Intent.withTitle(title: String): Intent {
+        extraKeys.forEach { putExtra(it, title) }
+        return addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    /** Activities inside the VOD app whose name mentions search, e.g. "SearchActivity". */
+    fun searchActivities(ctx: Context, pkg: String): List<String> = allActivities(ctx, pkg)
+        .filter { it.contains("search", ignoreCase = true) }
+
+    @Suppress("DEPRECATION")
+    fun allActivities(ctx: Context, pkg: String): List<String> = runCatching {
+        ctx.packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES)
+            .activities.orEmpty().filter { it.exported }.map { it.name }
+    }.getOrDefault(emptyList())
+
     /**
-     * Opens the VOD app. If it accepts search requests, it opens straight to the search
-     * for this title. Otherwise it just opens the app. The title is copied either way.
-     * Returns a message to show the viewer.
+     * Every way we know of to hand a title to the VOD app, keeping only the ones the
+     * box says the app can receive. Labels are stable so a chosen one can be saved.
      */
-    fun open(ctx: Context, pkg: String, title: String): String {
+    fun methods(ctx: Context, pkg: String, title: String): List<Pair<String, Intent>> {
+        val pm = ctx.packageManager
+        val out = ArrayList<Pair<String, Intent>>()
+        fun add(label: String, i: Intent) {
+            if (i.resolveActivity(pm) != null) out.add(label to i)
+        }
+        add("Play-from-search request",
+            Intent("android.media.action.MEDIA_PLAY_FROM_SEARCH").setPackage(pkg).withTitle(title))
+        add("Standard search request", Intent(Intent.ACTION_SEARCH).setPackage(pkg).withTitle(title))
+        add("Web search request", Intent(Intent.ACTION_WEB_SEARCH).setPackage(pkg).withTitle(title))
+        add("Share text to app",
+            Intent(Intent.ACTION_SEND).setType("text/plain").setPackage(pkg).withTitle(title))
+        for (a in searchActivities(ctx, pkg)) {
+            val short = a.substringAfterLast('.')
+            add("$short (search request)", Intent(Intent.ACTION_SEARCH).setClassName(pkg, a).withTitle(title))
+            add("$short (direct)", Intent().setClassName(pkg, a).withTitle(title))
+        }
+        return out
+    }
+
+    fun launch(ctx: Context, i: Intent): Boolean = runCatching { ctx.startActivity(i) }.isSuccess
+
+    /**
+     * Opens the VOD app for this title. Uses the hand-off method chosen on the test
+     * screen if there is one; otherwise just opens the app. The title is always copied
+     * so it can be pasted into the app's search box. Returns a message for the viewer.
+     */
+    fun open(ctx: Context, pkg: String, title: String, method: String?): String {
         ctx.getSystemService(ClipboardManager::class.java)
             ?.setPrimaryClip(ClipData.newPlainText("title", title))
 
-        val search = Intent(Intent.ACTION_SEARCH)
-            .setPackage(pkg)
-            .putExtra(SearchManager.QUERY, title)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (search.resolveActivity(ctx.packageManager) != null) {
-            val ok = runCatching { ctx.startActivity(search) }.isSuccess
-            if (ok) return "Searching for \"$title\""
+        if (method != null) {
+            val m = methods(ctx, pkg, title).firstOrNull { it.first == method }
+            if (m != null && launch(ctx, m.second)) return "Opening \"$title\""
         }
 
         val pm = ctx.packageManager
@@ -238,6 +285,6 @@ object Apps {
             ?: return "Couldn't open that app. Pick it again in Settings."
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         ctx.startActivity(launch)
-        return "Search for: $title"
+        return "Search for: $title  (copied — try long-press OK to paste)"
     }
 }
