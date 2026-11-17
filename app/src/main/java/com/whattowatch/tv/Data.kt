@@ -314,6 +314,8 @@ object Apps {
             method != null -> methods(ctx, pkg, title).firstOrNull { it.first == method }
                 ?.let { launch(ctx, it.second) } ?: false
             // With the typing helper on, go straight to the app's own search screen if it has one.
+            // TV shows: start from the app's home screen so the helper can open its TV section.
+            helper && isTv -> openApp(ctx, pkg, fresh = true)
             helper -> searchActivities(ctx, pkg).firstOrNull()
                 ?.let { launch(ctx, Intent().setClassName(pkg, it).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } ?: false
             else -> false
@@ -328,10 +330,12 @@ object Apps {
     }
 
     /** Opens the app normally (inspect mode helper, and fallback). */
-    fun openApp(ctx: Context, pkg: String): Boolean {
+    fun openApp(ctx: Context, pkg: String, fresh: Boolean = false): Boolean {
         val pm = ctx.packageManager
         val main = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg) ?: return false
-        return launch(ctx, main.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        main.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (fresh) main.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        return launch(ctx, main)
     }
 
     /** Opens the app's search screen (or the app) and records what's on screen. */

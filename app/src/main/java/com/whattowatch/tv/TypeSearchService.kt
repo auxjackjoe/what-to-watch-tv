@@ -22,8 +22,7 @@ class TypeSearchService : AccessibilityService() {
     class Pending(val pkg: String, val title: String, val isTv: Boolean, val until: Long) {
         var clickedSearch = false
         var busy = false
-        var tvDone = !isTv   // TV shows: first go into the app's TV Shows section
-        var triedMain = false
+        var lastClick = 0L
     }
 
     companion object {
@@ -116,7 +115,7 @@ class TypeSearchService : AccessibilityService() {
         for (n in nodes) {
             for (raw in listOfNotNull(n.text?.toString(), n.contentDescription?.toString())) {
                 val w = raw.trim().lowercase()
-                if (w.isEmpty() || w.length > 20 || "live" in w) continue
+                if (w.isEmpty() || w.length > 20 || "live" in w || "search" in w) continue
                 val score = when {
                     w in exact -> 2
                     "tv show" in w || "series" in w -> 1
@@ -126,6 +125,62 @@ class TypeSearchService : AccessibilityService() {
             }
         }
         return best
+    }
+
+    private fun byId(nodes: List<AccessibilityNodeInfo>, idEnd: String) =
+        nodes.firstOrNull { it.viewIdResourceName?.endsWith(idEnd) == true }
+
+    private fun pressed(p: Pending, node: AccessibilityNodeInfo?): Boolean {
+        if (node == null || !click(node)) return false
+        p.lastClick = System.currentTimeMillis()
+        return true
+    }
+
+    private fun back(p: Pending) {
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        p.lastClick = System.currentTimeMillis()
+    }
+
+    /**
+     * Returns true when the current screen is a search box for the right kind of title
+     * (or we can't tell). Otherwise presses the buttons that lead there and returns false.
+     *
+     * Heat VOD: home → "TV Series" → its Search button → search screen labelled
+     * "TV Series - Search". Opening the search screen directly gives "Movies - Search".
+     */
+    private fun rightSection(p: Pending, nodes: List<AccessibilityNodeInfo>): Boolean {
+        val wantWords = if (p.isTv) listOf("series", "tv", "show") else listOf("movie", "film")
+        val wrongWords = if (p.isTv) listOf("movie", "film") else listOf("series", "tv", "show")
+        fun String.has(words: List<String>) = words.any { contains(it, ignoreCase = true) }
+
+        val hasField = nodes.any { it.isEditable }
+        val searchLabel = byId(nodes, "search_result_count")?.text?.toString()
+        if (hasField) {
+            if (searchLabel != null && searchLabel.has(wrongWords) && !searchLabel.has(wantWords)) {
+                back(p) // search screen for the other section: go back and pick the right one
+                return false
+            }
+            return true
+        }
+
+        // A section screen (Heat VOD's VodActivity shows its type, e.g. "TV Series").
+        val sectionLabel = byId(nodes, "enter_type")?.text?.toString()
+        if (sectionLabel != null) {
+            if (sectionLabel.has(wantWords)) {
+                val search = byId(nodes, "ss_text_v")
+                    ?: nodes.firstOrNull { it.text?.toString()?.trim().equals("search", ignoreCase = true) }
+                pressed(p, search)
+            } else {
+                back(p)
+            }
+            return false
+        }
+
+        if (!p.isTv) return true // movies: the normal steps below handle it
+
+        // Home screen: press the TV Series / TV Shows tile.
+        if (pressed(p, findTvTab(nodes))) return false
+        return true // nothing recognisable: try the normal steps (search button / text box)
     }
 
     private fun openMain(pkg: String) {
@@ -148,20 +203,15 @@ class TypeSearchService : AccessibilityService() {
         val p = pending ?: return
         val nodes = currentNodes(p.pkg) ?: return
 
-        // 0. TV shows live in their own section: go there first.
-        if (!p.tvDone) {
-            val tab = findTvTab(nodes)
-            if (tab != null && click(tab)) {
-                p.tvDone = true
-                return // wait for the TV Shows screen to appear
-            }
-            if (!p.triedMain) {
-                p.triedMain = true
-                openMain(p.pkg) // not on this screen: look on the app's main screen instead
-                return
-            }
-            p.tvDone = true // couldn't find it; search anyway
+        // Give the app time to react after each button press.
+        if (System.currentTimeMillis() - p.lastClick < 1200) {
+            handler.removeCallbacks(attemptRunnable)
+            handler.postDelayed(attemptRunnable, 700)
+            return
         }
+
+        // 0. Make sure we're searching the right section (Heat VOD keeps Movies and TV Series apart).
+        if (!rightSection(p, nodes)) return
 
         // 1. A normal text box: put the title straight in.
         val field = nodes.firstOrNull { it.isEditable }
@@ -257,7 +307,7 @@ class TypeSearchService : AccessibilityService() {
         synchronized(dumps) {
             dumps.remove(screenName)
             dumps[screenName] = lines.joinToString("\n")
-            while (dumps.size > 2) dumps.remove(dumps.keys.first())
+            while (dumps.size > 3) dumps.remove(dumps.keys.first())
             lastDump = dumps.entries.joinToString("\n\n") { "== ${it.key} ==\n${it.value}" }
         }
     }
