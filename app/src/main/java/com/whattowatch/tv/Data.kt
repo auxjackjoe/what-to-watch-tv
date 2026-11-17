@@ -289,8 +289,8 @@ object Apps {
     /** Opens the app normally (inspect mode helper, and fallback). */
     fun openApp(ctx: Context, pkg: String): Boolean {
         val pm = ctx.packageManager
-        val launch = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg) ?: return false
-        return launch(ctx, launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val main = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg) ?: return false
+        return launch(ctx, main.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     /** Opens the app's search screen (or the app) and records what's on screen. */
