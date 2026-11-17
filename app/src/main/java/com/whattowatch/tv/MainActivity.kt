@@ -832,6 +832,7 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("SETTINGS", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+        HelperStatus()
         Text("Main VOD app (the big Watch button): $app1", color = Color.White, fontSize = 18.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             TvButton("Choose main VOD app", modifier = Modifier.focusRequester(fr)) { onPickApp(1) }
@@ -890,6 +891,13 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
     val methods = remember(pkg, title) { Apps.methods(ctx, pkg, title) }
     val activities = remember(pkg) { Apps.allActivities(ctx, pkg) }
     val current = remember(version) { store.method(slot) }
+    var dump by remember { mutableStateOf(TypeSearchService.lastDump) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            dump = TypeSearchService.lastDump
+            delay(1000)
+        }
+    }
     val fr = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         delay(100)
@@ -907,8 +915,9 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
                 "Press Try on each one. If $appName opens showing the movie below, come back and press Use this.",
                 color = Muted, fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp),
             )
+            HelperStatus()
             Text(
-                "Now using: ${current ?: "Just open the app"}",
+                "Now using: ${current ?: "Automatic"}",
                 color = Gold, fontSize = 16.sp, modifier = Modifier.padding(vertical = 8.dp),
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -941,7 +950,22 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
             }
         }
         item {
-            TvButton("Use: just open the app") { store.setMethod(slot, null); onChanged(); toast("Saved") }
+            TvButton("Use: automatic (recommended)") { store.setMethod(slot, null); onChanged(); toast("Saved") }
+        }
+        item {
+            Spacer(Modifier.height(12.dp))
+            Text("Troubleshooting", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "Press Inspect: $appName opens its search screen. Wait 3 seconds, press Back, then take a photo of the text that appears below.",
+                color = Muted, fontSize = 15.sp, modifier = Modifier.padding(vertical = 6.dp),
+            )
+            TvButton("Inspect $appName search screen") {
+                if (!TypeSearchService.isEnabled(ctx)) toast("Turn on the search typing helper first")
+                else Apps.inspect(ctx, pkg)
+            }
+            if (dump.isNotEmpty()) {
+                Text(dump, color = Color.White, fontSize = 11.sp, lineHeight = 13.sp, modifier = Modifier.padding(top = 10.dp))
+            }
         }
         item {
             Text(
@@ -949,6 +973,35 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
                     activities.joinToString(", ") { it.substringAfterLast('.') }.ifEmpty { "none visible" },
                 color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 16.dp),
             )
+        }
+    }
+}
+
+// ---------- Typing helper status ----------
+
+@Composable
+fun HelperStatus() {
+    val ctx = LocalContext.current
+    var on by remember { mutableStateOf(TypeSearchService.isEnabled(ctx)) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            on = TypeSearchService.isEnabled(ctx)
+            delay(1000)
+        }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text(
+            if (on) "✓ Search typing helper is ON" else "Search typing helper is OFF (Watch can't type the title for you)",
+            color = if (on) Color(0xFF6BD68A) else Gold, fontSize = 17.sp,
+        )
+        if (!on) {
+            TvButton("Turn it on") {
+                if (!Apps.openAccessibilitySettings(ctx)) {
+                    Toast.makeText(ctx, "Open box Settings → Accessibility manually", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(ctx, "Find \"What To Watch search helper\" and turn it on", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 }

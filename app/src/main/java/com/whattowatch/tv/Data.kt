@@ -267,18 +267,42 @@ object Apps {
     fun open(ctx: Context, pkg: String, title: String, method: String?): String {
         ctx.getSystemService(ClipboardManager::class.java)
             ?.setPrimaryClip(ClipData.newPlainText("title", title))
+        val helper = TypeSearchService.isEnabled(ctx)
 
-        if (method != null) {
-            val m = methods(ctx, pkg, title).firstOrNull { it.first == method }
-            if (m != null && launch(ctx, m.second)) return "Opening \"$title\""
+        val opened = when {
+            method != null -> methods(ctx, pkg, title).firstOrNull { it.first == method }
+                ?.let { launch(ctx, it.second) } ?: false
+            // With the typing helper on, go straight to the app's own search screen if it has one.
+            helper -> searchActivities(ctx, pkg).firstOrNull()
+                ?.let { launch(ctx, Intent().setClassName(pkg, it).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } ?: false
+            else -> false
+        } || openApp(ctx, pkg)
+
+        if (!opened) return "Couldn't open that app. Pick it again in Settings."
+        if (helper) {
+            TypeSearchService.request(pkg, title)
+            return "Typing \"$title\"…"
         }
-
-        val pm = ctx.packageManager
-        val launch = pm.getLeanbackLaunchIntentForPackage(pkg)
-            ?: pm.getLaunchIntentForPackage(pkg)
-            ?: return "Couldn't open that app. Pick it again in Settings."
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        ctx.startActivity(launch)
-        return "Search for: $title  (copied — try long-press OK to paste)"
+        return "Search for: $title"
     }
+
+    /** Opens the app normally (inspect mode helper, and fallback). */
+    fun openApp(ctx: Context, pkg: String): Boolean {
+        val pm = ctx.packageManager
+        val launch = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg) ?: return false
+        return launch(ctx, launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    /** Opens the app's search screen (or the app) and records what's on screen. */
+    fun inspect(ctx: Context, pkg: String) {
+        TypeSearchService.lastDump = ""
+        TypeSearchService.inspectPkg = pkg
+        val sa = searchActivities(ctx, pkg).firstOrNull()
+        val ok = sa != null && launch(ctx, Intent().setClassName(pkg, sa).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        if (!ok) openApp(ctx, pkg)
+    }
+
+    fun openAccessibilitySettings(ctx: Context): Boolean = launch(
+        ctx, Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    )
 }

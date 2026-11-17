@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="helper_label">What To Watch search helper</string>
+    <string name="helper_description">After you press Watch in What To Watch, this types the movie or show name into your VOD app\'s search box. It does nothing at any other time.</string>
+</resources>
