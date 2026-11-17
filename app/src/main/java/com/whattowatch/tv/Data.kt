@@ -34,6 +34,7 @@ data class Title(
     val typeLabel get() = if (type == "tv") "TV Show" else "Movie"
     fun posterUrl() = poster?.let { "https://image.tmdb.org/t/p/w342$it" }
     fun backdropUrl() = (backdrop ?: poster)?.let { "https://image.tmdb.org/t/p/w1280$it" }
+    fun cardUrl() = backdrop?.let { "https://image.tmdb.org/t/p/w780$it" } ?: posterUrl()
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("media_type", type).put("title", name)
@@ -123,6 +124,46 @@ object Tmdb {
     suspend fun topRated(type: String) = parse(get("/$type/top_rated"), type)
     suspend fun recommendations(t: Title) = parse(get("/${t.type}/${t.id}/recommendations"), t.type)
     suspend fun search(q: String) = parse(get("/search/multi", mapOf("query" to q)), null)
+
+    // ----- title logos (the stylised title art Netflix and Apple TV show) -----
+    private val logoCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    fun cachedLogo(key: String): String? = logoCache[key]
+
+    /** Path of the best English logo, or "" if there isn't one. */
+    suspend fun logo(t: Title): String {
+        logoCache[t.key]?.let { return it }
+        val a = get("/${t.type}/${t.id}/images", mapOf("include_image_language" to "en,null")).optJSONArray("logos")
+        var path = ""
+        if (a != null && a.length() > 0) {
+            for (i in 0 until a.length()) {
+                val l = a.getJSONObject(i)
+                if (l.optString("iso_639_1") == "en") { path = l.optString("file_path"); break }
+            }
+            if (path.isEmpty()) path = a.getJSONObject(0).optString("file_path")
+        }
+        logoCache[t.key] = path
+        return path
+    }
+
+    // ----- extra details for the details page -----
+    data class Extra(val runtime: Int, val seasons: Int, val collectionId: Int?)
+
+    suspend fun extra(t: Title): Extra {
+        val o = get("/${t.type}/${t.id}")
+        val c = o.optJSONObject("belongs_to_collection")
+        return Extra(o.optInt("runtime"), o.optInt("number_of_seasons"), c?.optInt("id")?.takeIf { it > 0 })
+    }
+
+    /** A movie series (e.g. James Bond), in release order. */
+    suspend fun collection(id: Int): Row {
+        val o = get("/collection/$id")
+        val a = o.optJSONArray("parts") ?: JSONArray()
+        val parts = (0 until a.length()).map { a.getJSONObject(it) }
+            .filter { !it.isNull("release_date") && it.optString("release_date").isNotEmpty() }
+            .sortedBy { it.optString("release_date") }
+            .mapNotNull { Title.fromJson(it, "movie") }
+        return Row(o.optString("name").removeSuffix(" Collection"), parts)
+    }
 
     private suspend fun discoverService(type: String, providers: String) = parse(
         get(

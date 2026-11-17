@@ -3,10 +3,17 @@ package com.whattowatch.tv
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.util.Calendar
 
 /** One row on a page: its name and how to load it. */
-class RowSpec(val title: String, val numbered: Boolean = false, val load: suspend () -> List<Title>)
+class RowSpec(
+    val title: String,
+    val numbered: Boolean = false,
+    val loadRow: (suspend () -> Row)? = null,
+    val load: suspend () -> List<Title> = { emptyList() },
+)
 
 /** A genre, with TMDB's id for it on the movie side and the TV side (they differ). */
 data class Genre(val name: String, val movie: Int?, val tv: Int?, val color: Long)
@@ -67,6 +74,7 @@ object Catalog {
     fun home() = listOf(
         RowSpec("Top 10 Today", numbered = true) { Tmdb.trendingAll("day").take(10) },
         RowSpec("Trending This Week") { Tmdb.trendingAll("week") },
+    ) + (if (isHolidaySeason) listOf(christmasFavorites()) else emptyList()) + listOf(
         RowSpec("Popular on Netflix") { Tmdb.onService("8") },
         RowSpec("Popular on Max") { Tmdb.onService("1899|384") },
         RowSpec("Biggest Hits of ${year - 1}") { Tmdb.both(hits("movie", year - 1, year - 1), hits("tv", year - 1, year - 1)) },
@@ -152,8 +160,55 @@ object Catalog {
     )
 
     /** Loads all rows of a page in parallel; rows that fail or come back empty are skipped. */
+    private val gate = Semaphore(8) // be gentle with TMDB and the box's Wi-Fi
+
     suspend fun load(specs: List<RowSpec>): List<Row> = coroutineScope {
-        specs.map { s -> async { runCatching { Row(s.title, s.load(), s.numbered) }.getOrNull() } }
-            .awaitAll().filterNotNull().filter { it.items.isNotEmpty() }
+        specs.map { s ->
+            async {
+                gate.withPermit {
+                    runCatching { s.loadRow?.invoke() ?: Row(s.title, s.load(), s.numbered) }.getOrNull()
+                }
+            }
+        }.awaitAll().filterNotNull().filter { it.items.isNotEmpty() }
     }
+
+    // ----- Movie series -----
+
+    val seriesIds = listOf(
+        645, 1241, 435259, 10, 86311, 131292, 131295, 284433, 531241, 448150, 748, 263, 119, 121938,
+        9485, 87359, 328, 84, 295, 131635, 404609, 2344, 31562, 1570, 528, 8091, 87096, 726871,
+        230, 264, 1575, 553717, 304, 135483, 14890, 90863, 86055, 2980, 8945, 33514, 8650, 102322,
+        1006, 86119, 2602, 91361, 313086, 10194, 2150, 86066, 468222, 137697, 89137, 77816, 8354,
+        87118, 495527, 9888,
+    )
+
+    fun series(): List<RowSpec> = seriesIds.map { id -> RowSpec("series:$id", loadRow = { Tmdb.collection(id) }) }
+
+    // ----- Christmas -----
+
+    private const val XMAS = "207317" // TMDB keyword "christmas"
+
+    private fun xmas(type: String, extra: Map<String, String> = emptyMap()) =
+        mapOf("with_keywords" to XMAS, "sort_by" to "vote_count.desc") + extra
+
+    fun christmasFavorites() = RowSpec("Christmas Favorites") { Tmdb.discover("movie", xmas("movie")) }
+
+    fun christmas(): List<RowSpec> = listOf(
+        christmasFavorites(),
+        RowSpec("Popular This Season") {
+            Tmdb.discover("movie", xmas("movie", mapOf("sort_by" to "popularity.desc", "vote_count.gte" to "30")))
+        },
+        RowSpec("New Christmas Movies") {
+            Tmdb.discover("movie", xmas("movie", dates("movie", year - 3, year) + mapOf("sort_by" to "popularity.desc")))
+        },
+        RowSpec("Christmas Comedies") { Tmdb.discover("movie", xmas("movie", mapOf("with_genres" to "35"))) },
+        RowSpec("Animated & Family Christmas") { Tmdb.discover("movie", xmas("movie", mapOf("with_genres" to "16|10751"))) },
+        RowSpec("Christmas Romance") { Tmdb.discover("movie", xmas("movie", mapOf("with_genres" to "10749"))) },
+        RowSpec("Christmas Classics") { Tmdb.discover("movie", xmas("movie", dates("movie", 1940, 1999))) },
+        RowSpec("Christmas Action & Thrillers") { Tmdb.discover("movie", xmas("movie", mapOf("with_genres" to "28|53|80"))) },
+        RowSpec("Christmas TV & Specials") { Tmdb.discover("tv", xmas("tv")) },
+    )
+
+    val isHolidaySeason: Boolean
+        get() = Calendar.getInstance().get(Calendar.MONTH).let { it == Calendar.NOVEMBER || it == Calendar.DECEMBER }
 }
