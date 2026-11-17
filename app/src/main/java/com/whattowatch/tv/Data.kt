@@ -1,0 +1,243 @@
+package com.whattowatch.tv
+
+import android.app.SearchManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+
+// ---------- A movie or TV show ----------
+
+data class Title(
+    val id: Int,
+    val type: String, // "movie" or "tv"
+    val name: String,
+    val overview: String,
+    val poster: String?,
+    val backdrop: String?,
+    val year: String,
+    val rating: Double,
+) {
+    val key get() = "$type:$id"
+    val typeLabel get() = if (type == "tv") "TV Show" else "Movie"
+    fun posterUrl() = poster?.let { "https://image.tmdb.org/t/p/w342$it" }
+    fun backdropUrl() = (backdrop ?: poster)?.let { "https://image.tmdb.org/t/p/w1280$it" }
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id).put("media_type", type).put("title", name)
+        .put("overview", overview).put("poster_path", poster ?: JSONObject.NULL)
+        .put("backdrop_path", backdrop ?: JSONObject.NULL)
+        .put("release_date", year).put("vote_average", rating)
+
+    companion object {
+        private fun JSONObject.str(k: String) = if (isNull(k)) "" else optString(k)
+
+        fun fromJson(o: JSONObject, fallbackType: String? = null): Title? {
+            val type = o.str("media_type").ifEmpty { fallbackType ?: return null }
+            if (type != "movie" && type != "tv") return null
+            val poster = o.str("poster_path").ifEmpty { null } ?: return null
+            return Title(
+                id = o.optInt("id"),
+                type = type,
+                name = o.str("title").ifEmpty { o.str("name") },
+                overview = o.str("overview"),
+                poster = poster,
+                backdrop = o.str("backdrop_path").ifEmpty { null },
+                year = o.str("release_date").ifEmpty { o.str("first_air_date") }.take(4),
+                rating = o.optDouble("vote_average", 0.0),
+            )
+        }
+    }
+}
+
+data class Row(val title: String, val items: List<Title>)
+
+// ---------- TMDB (free movie & TV database) ----------
+
+object Tmdb {
+    private val key = BuildConfig.TMDB_KEY
+    val hasKey get() = key.isNotBlank()
+
+    private suspend fun get(path: String, params: Map<String, String> = emptyMap()): JSONObject =
+        withContext(Dispatchers.IO) {
+            val q = params.toMutableMap()
+            q.putIfAbsent("language", "en-US")
+            val bearer = key.length > 50 // long "read access token" vs short "API key"
+            if (!bearer) q["api_key"] = key
+            val qs = q.entries.joinToString("&") { "${it.key}=${URLEncoder.encode(it.value, "UTF-8")}" }
+            val conn = URL("https://api.themoviedb.org/3$path?$qs").openConnection() as HttpURLConnection
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 15_000
+            conn.setRequestProperty("Accept", "application/json")
+            if (bearer) conn.setRequestProperty("Authorization", "Bearer $key")
+            try {
+                if (conn.responseCode !in 200..299) throw RuntimeException("TMDB error ${conn.responseCode}")
+                JSONObject(conn.inputStream.bufferedReader().readText())
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+    private fun parse(o: JSONObject, type: String?): List<Title> {
+        val a = o.optJSONArray("results") ?: return emptyList()
+        return (0 until a.length()).mapNotNull { Title.fromJson(a.getJSONObject(it), type) }
+    }
+
+    private fun interleave(a: List<Title>, b: List<Title>): List<Title> {
+        val out = ArrayList<Title>()
+        for (i in 0 until maxOf(a.size, b.size)) {
+            a.getOrNull(i)?.let { out.add(it) }
+            b.getOrNull(i)?.let { out.add(it) }
+        }
+        return out
+    }
+
+    suspend fun trending() = parse(get("/trending/all/week"), null)
+    suspend fun popular(type: String) = parse(get("/$type/popular"), type)
+    suspend fun topRated(type: String) = parse(get("/$type/top_rated"), type)
+    suspend fun recommendations(t: Title) = parse(get("/${t.type}/${t.id}/recommendations"), t.type)
+    suspend fun search(q: String) = parse(get("/search/multi", mapOf("query" to q)), null)
+
+    private suspend fun discover(type: String, providers: String) = parse(
+        get(
+            "/discover/$type", mapOf(
+                "with_watch_providers" to providers,
+                "watch_region" to "US",
+                "with_watch_monetization_types" to "flatrate",
+                "sort_by" to "popularity.desc",
+            )
+        ), type
+    )
+
+    suspend fun onService(providers: String) = coroutineScope {
+        val tv = async { discover("tv", providers) }
+        val movies = async { discover("movie", providers) }
+        interleave(tv.await(), movies.await())
+    }
+
+    /** All the home-screen rows, loaded in parallel. Rows that fail are skipped. */
+    suspend fun homeRows(): List<Row> = coroutineScope {
+        val specs: List<Pair<String, suspend () -> List<Title>>> = listOf(
+            "Trending This Week" to suspend { trending() },
+            "Popular on Netflix" to suspend { onService("8") },
+            "Popular on Max" to suspend { onService("1899|384") },
+            "Popular on Disney+" to suspend { onService("337") },
+            "Popular on Prime Video" to suspend { onService("9|119") },
+            "Popular on Hulu" to suspend { onService("15") },
+            "Popular on Apple TV+" to suspend { onService("350") },
+            "Popular on Paramount+" to suspend { onService("531") },
+            "Popular on Peacock" to suspend { onService("386|387") },
+            "Popular Movies" to suspend { popular("movie") },
+            "Popular TV Shows" to suspend { popular("tv") },
+            "Top Rated Movies" to suspend { topRated("movie") },
+            "Top Rated TV Shows" to suspend { topRated("tv") },
+        )
+        specs.map { (name, load) -> async { runCatching { Row(name, load()) }.getOrNull() } }
+            .awaitAll().filterNotNull().filter { it.items.isNotEmpty() }
+    }
+}
+
+// ---------- Things saved on the box ----------
+
+class Store(ctx: Context) {
+    private val p = ctx.getSharedPreferences("wtw", Context.MODE_PRIVATE)
+
+    private fun load(k: String): List<Title> = runCatching {
+        val a = JSONArray(p.getString(k, "[]"))
+        (0 until a.length()).mapNotNull { Title.fromJson(a.getJSONObject(it)) }
+    }.getOrDefault(emptyList())
+
+    private fun save(k: String, list: List<Title>) {
+        val a = JSONArray()
+        list.forEach { a.put(it.toJson()) }
+        p.edit().putString(k, a.toString()).apply()
+    }
+
+    fun watchlist(): List<Title> = load("watchlist")
+    fun watched(): Set<String> = p.getStringSet("watched", emptySet())?.toSet() ?: emptySet()
+    fun inWatchlist(t: Title) = watchlist().any { it.key == t.key }
+    fun isWatched(t: Title) = t.key in watched()
+
+    fun toggleWatchlist(t: Title) {
+        val l = watchlist().toMutableList()
+        if (!l.removeAll { it.key == t.key }) l.add(0, t)
+        save("watchlist", l)
+    }
+
+    fun toggleWatched(t: Title) {
+        val w = watched().toMutableSet()
+        if (!w.remove(t.key)) {
+            w.add(t.key)
+            save("watchlist", watchlist().filter { it.key != t.key })
+        }
+        p.edit().putStringSet("watched", w).apply()
+    }
+
+    fun clearAll() {
+        p.edit().remove("watchlist").remove("watched").apply()
+    }
+
+    fun vodApp(slot: Int): String? = p.getString("app$slot", null)
+    fun setVodApp(slot: Int, pkg: String) = p.edit().putString("app$slot", pkg).apply()
+}
+
+// ---------- Opening your VOD apps ----------
+
+data class AppInfo(val pkg: String, val label: String)
+
+object Apps {
+    fun installed(ctx: Context): List<AppInfo> {
+        val pm = ctx.packageManager
+        val found = LinkedHashMap<String, String>()
+        for (cat in listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)) {
+            val i = Intent(Intent.ACTION_MAIN).addCategory(cat)
+            for (r in pm.queryIntentActivities(i, 0)) {
+                val pkg = r.activityInfo.packageName
+                if (pkg != ctx.packageName) found.putIfAbsent(pkg, r.loadLabel(pm).toString())
+            }
+        }
+        return found.map { AppInfo(it.key, it.value) }.sortedBy { it.label.lowercase() }
+    }
+
+    fun label(ctx: Context, pkg: String): String = runCatching {
+        val pm = ctx.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+    }.getOrDefault(pkg)
+
+    /**
+     * Opens the VOD app. If it accepts search requests, it opens straight to the search
+     * for this title. Otherwise it just opens the app. The title is copied either way.
+     * Returns a message to show the viewer.
+     */
+    fun open(ctx: Context, pkg: String, title: String): String {
+        ctx.getSystemService(ClipboardManager::class.java)
+            ?.setPrimaryClip(ClipData.newPlainText("title", title))
+
+        val search = Intent(Intent.ACTION_SEARCH)
+            .setPackage(pkg)
+            .putExtra(SearchManager.QUERY, title)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (search.resolveActivity(ctx.packageManager) != null) {
+            val ok = runCatching { ctx.startActivity(search) }.isSuccess
+            if (ok) return "Searching for \"$title\""
+        }
+
+        val pm = ctx.packageManager
+        val launch = pm.getLeanbackLaunchIntentForPackage(pkg)
+            ?: pm.getLaunchIntentForPackage(pkg)
+            ?: return "Couldn't open that app. Pick it again in Settings."
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        ctx.startActivity(launch)
+        return "Search for: $title"
+    }
+}
