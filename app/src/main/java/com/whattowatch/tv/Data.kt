@@ -28,6 +28,7 @@ data class Title(
     val backdrop: String?,
     val year: String,
     val rating: Double,
+    val genreIds: List<Int> = emptyList(),
 ) {
     val key get() = "$type:$id"
     val typeLabel get() = if (type == "tv") "TV Show" else "Movie"
@@ -39,6 +40,7 @@ data class Title(
         .put("overview", overview).put("poster_path", poster ?: JSONObject.NULL)
         .put("backdrop_path", backdrop ?: JSONObject.NULL)
         .put("release_date", year).put("vote_average", rating)
+        .put("genre_ids", JSONArray(genreIds))
 
     companion object {
         private fun JSONObject.str(k: String) = if (isNull(k)) "" else optString(k)
@@ -56,12 +58,14 @@ data class Title(
                 backdrop = o.str("backdrop_path").ifEmpty { null },
                 year = o.str("release_date").ifEmpty { o.str("first_air_date") }.take(4),
                 rating = o.optDouble("vote_average", 0.0),
+                genreIds = o.optJSONArray("genre_ids")?.let { a -> (0 until a.length()).map { a.optInt(it) } }
+                    ?: emptyList(),
             )
         }
     }
 }
 
-data class Row(val title: String, val items: List<Title>)
+data class Row(val title: String, val items: List<Title>, val numbered: Boolean = false)
 
 // ---------- TMDB (free movie & TV database) ----------
 
@@ -103,13 +107,24 @@ object Tmdb {
         return out
     }
 
-    suspend fun trending() = parse(get("/trending/all/week"), null)
+    suspend fun trendingAll(window: String = "week") = parse(get("/trending/all/$window"), null)
+    suspend fun trending(type: String, window: String = "week") = parse(get("/trending/$type/$window"), type)
+
+    suspend fun discover(type: String, params: Map<String, String>) =
+        parse(get("/discover/$type", params + ("include_adult" to "false")), type)
+
+    /** Movies and shows mixed together. Pass null to skip one side. */
+    suspend fun both(movie: Map<String, String>?, tv: Map<String, String>?) = coroutineScope {
+        val m = async { movie?.let { discover("movie", it) } ?: emptyList() }
+        val t = async { tv?.let { discover("tv", it) } ?: emptyList() }
+        interleave(m.await(), t.await())
+    }
     suspend fun popular(type: String) = parse(get("/$type/popular"), type)
     suspend fun topRated(type: String) = parse(get("/$type/top_rated"), type)
     suspend fun recommendations(t: Title) = parse(get("/${t.type}/${t.id}/recommendations"), t.type)
     suspend fun search(q: String) = parse(get("/search/multi", mapOf("query" to q)), null)
 
-    private suspend fun discover(type: String, providers: String) = parse(
+    private suspend fun discoverService(type: String, providers: String) = parse(
         get(
             "/discover/$type", mapOf(
                 "with_watch_providers" to providers,
@@ -121,30 +136,9 @@ object Tmdb {
     )
 
     suspend fun onService(providers: String) = coroutineScope {
-        val tv = async { discover("tv", providers) }
-        val movies = async { discover("movie", providers) }
+        val tv = async { discoverService("tv", providers) }
+        val movies = async { discoverService("movie", providers) }
         interleave(tv.await(), movies.await())
-    }
-
-    /** All the home-screen rows, loaded in parallel. Rows that fail are skipped. */
-    suspend fun homeRows(): List<Row> = coroutineScope {
-        val specs: List<Pair<String, suspend () -> List<Title>>> = listOf(
-            "Trending This Week" to suspend { trending() },
-            "Popular on Netflix" to suspend { onService("8") },
-            "Popular on Max" to suspend { onService("1899|384") },
-            "Popular on Disney+" to suspend { onService("337") },
-            "Popular on Prime Video" to suspend { onService("9|119") },
-            "Popular on Hulu" to suspend { onService("15") },
-            "Popular on Apple TV+" to suspend { onService("350") },
-            "Popular on Paramount+" to suspend { onService("531") },
-            "Popular on Peacock" to suspend { onService("386|387") },
-            "Popular Movies" to suspend { popular("movie") },
-            "Popular TV Shows" to suspend { popular("tv") },
-            "Top Rated Movies" to suspend { topRated("movie") },
-            "Top Rated TV Shows" to suspend { topRated("tv") },
-        )
-        specs.map { (name, load) -> async { runCatching { Row(name, load()) }.getOrNull() } }
-            .awaitAll().filterNotNull().filter { it.items.isNotEmpty() }
     }
 }
 
