@@ -2,6 +2,7 @@ package com.whattowatch.tv
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -18,15 +19,26 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 class TypeSearchService : AccessibilityService() {
 
-    class Pending(val pkg: String, val title: String, val until: Long) {
+    class Pending(val pkg: String, val title: String, val isTv: Boolean, val until: Long) {
         var clickedSearch = false
         var busy = false
+        var tvDone = !isTv   // TV shows: first go into the app's TV Shows section
+        var triedMain = false
     }
 
     companion object {
         @Volatile var pending: Pending? = null
         @Volatile var inspectPkg: String? = null
+        @Volatile var inspectUntil: Long = 0
         @Volatile var lastDump: String = ""
+        private val dumps = LinkedHashMap<String, String>()
+
+        fun startInspect(pkg: String) {
+            synchronized(dumps) { dumps.clear() }
+            lastDump = ""
+            inspectPkg = pkg
+            inspectUntil = System.currentTimeMillis() + 120_000
+        }
 
         fun isEnabled(ctx: Context): Boolean {
             val list = Settings.Secure.getString(
@@ -37,21 +49,25 @@ class TypeSearchService : AccessibilityService() {
             }
         }
 
-        fun request(pkg: String, title: String) {
-            pending = Pending(pkg, title, System.currentTimeMillis() + 20_000)
+        fun request(pkg: String, title: String, isTv: Boolean) {
+            pending = Pending(pkg, title, isTv, System.currentTimeMillis() + if (isTv) 30_000 else 20_000)
         }
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private val attemptRunnable = Runnable { attempt() }
     private val dumpRunnable = Runnable { dump() }
+    private var screenName = "screen"
 
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val pkg = event?.packageName?.toString() ?: return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            event.className?.toString()?.substringAfterLast('.')?.let { screenName = it }
+        }
 
-        if (inspectPkg == pkg) {
+        if (inspectPkg == pkg && System.currentTimeMillis() < inspectUntil) {
             handler.removeCallbacks(dumpRunnable)
             handler.postDelayed(dumpRunnable, 2500)
         }
@@ -88,7 +104,36 @@ class TypeSearchService : AccessibilityService() {
     private fun click(node: AccessibilityNodeInfo): Boolean {
         var n: AccessibilityNodeInfo? = node
         while (n != null && !n.isClickable) n = n.parent
-        return n?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+        return n?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            ?: node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    /** The app's "TV Shows" / "Series" button, if this screen has one (never "Live TV"). */
+    private fun findTvTab(nodes: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
+        val exact = setOf("tv shows", "tv show", "tv series", "series", "shows", "tv", "tvshows")
+        var best: AccessibilityNodeInfo? = null
+        var bestScore = 0
+        for (n in nodes) {
+            for (raw in listOfNotNull(n.text?.toString(), n.contentDescription?.toString())) {
+                val w = raw.trim().lowercase()
+                if (w.isEmpty() || w.length > 20 || "live" in w) continue
+                val score = when {
+                    w in exact -> 2
+                    "tv show" in w || "series" in w -> 1
+                    else -> 0
+                }
+                if (score > bestScore) { best = n; bestScore = score }
+            }
+        }
+        return best
+    }
+
+    private fun openMain(pkg: String) {
+        val pm = packageManager
+        val i = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg) ?: return
+        runCatching {
+            startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        }
     }
 
     private fun currentNodes(pkg: String): List<AccessibilityNodeInfo>? {
@@ -102,6 +147,21 @@ class TypeSearchService : AccessibilityService() {
     private fun attempt() {
         val p = pending ?: return
         val nodes = currentNodes(p.pkg) ?: return
+
+        // 0. TV shows live in their own section: go there first.
+        if (!p.tvDone) {
+            val tab = findTvTab(nodes)
+            if (tab != null && click(tab)) {
+                p.tvDone = true
+                return // wait for the TV Shows screen to appear
+            }
+            if (!p.triedMain) {
+                p.triedMain = true
+                openMain(p.pkg) // not on this screen: look on the app's main screen instead
+                return
+            }
+            p.tvDone = true // couldn't find it; search anyway
+        }
 
         // 1. A normal text box: put the title straight in.
         val field = nodes.firstOrNull { it.isEditable }
@@ -172,24 +232,33 @@ class TypeSearchService : AccessibilityService() {
         if (root.packageName?.toString() != pkg) return
         val lines = ArrayList<String>()
         fun walk(n: AccessibilityNodeInfo, depth: Int) {
-            if (lines.size >= 150) return
+            if (lines.size >= 70) return
+            val text = n.text?.toString()?.trim()?.take(28)
+            val desc = n.contentDescription?.toString()?.trim()?.take(28)
+            val id = n.viewIdResourceName?.substringAfterLast('/')
             val flags = buildList {
                 if (n.isEditable) add("EDIT")
                 if (n.isClickable) add("click")
                 if (n.isFocused) add("focused")
-            }.joinToString(",")
-            val parts = listOfNotNull(
-                n.className?.toString()?.substringAfterLast('.'),
-                n.viewIdResourceName?.substringAfterLast('/')?.let { "#$it" },
-                n.text?.toString()?.take(30)?.let { "\"$it\"" },
-                n.contentDescription?.toString()?.take(30)?.let { "($it)" },
-                flags.ifEmpty { null },
-            )
-            lines.add("  ".repeat(minOf(depth, 8)) + parts.joinToString(" "))
+            }
+            if (!text.isNullOrEmpty() || !desc.isNullOrEmpty() || id != null || flags.isNotEmpty()) {
+                val parts = listOfNotNull(
+                    n.className?.toString()?.substringAfterLast('.'),
+                    id?.let { "#$it" },
+                    text?.takeIf { it.isNotEmpty() }?.let { "\"$it\"" },
+                    desc?.takeIf { it.isNotEmpty() }?.let { "($it)" },
+                    flags.joinToString(",").ifEmpty { null },
+                )
+                lines.add("  ".repeat(minOf(depth, 6)) + parts.joinToString(" "))
+            }
             for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it, depth + 1) }
         }
         walk(root, 0)
-        lastDump = lines.joinToString("\n")
-        inspectPkg = null
+        synchronized(dumps) {
+            dumps.remove(screenName)
+            dumps[screenName] = lines.joinToString("\n")
+            while (dumps.size > 2) dumps.remove(dumps.keys.first())
+            lastDump = dumps.entries.joinToString("\n\n") { "== ${it.key} ==\n${it.value}" }
+        }
     }
 }

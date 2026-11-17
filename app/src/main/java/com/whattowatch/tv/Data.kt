@@ -305,7 +305,7 @@ object Apps {
      * screen if there is one; otherwise just opens the app. The title is always copied
      * so it can be pasted into the app's search box. Returns a message for the viewer.
      */
-    fun open(ctx: Context, pkg: String, title: String, method: String?): String {
+    fun open(ctx: Context, pkg: String, title: String, method: String?, isTv: Boolean = false): String {
         ctx.getSystemService(ClipboardManager::class.java)
             ?.setPrimaryClip(ClipData.newPlainText("title", title))
         val helper = TypeSearchService.isEnabled(ctx)
@@ -321,7 +321,7 @@ object Apps {
 
         if (!opened) return "Couldn't open that app. Pick it again in Settings."
         if (helper) {
-            TypeSearchService.request(pkg, title)
+            TypeSearchService.request(pkg, title, isTv)
             return "Typing \"$title\"…"
         }
         return "Search for: $title"
@@ -336,11 +336,8 @@ object Apps {
 
     /** Opens the app's search screen (or the app) and records what's on screen. */
     fun inspect(ctx: Context, pkg: String) {
-        TypeSearchService.lastDump = ""
-        TypeSearchService.inspectPkg = pkg
-        val sa = searchActivities(ctx, pkg).firstOrNull()
-        val ok = sa != null && launch(ctx, Intent().setClassName(pkg, sa).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        if (!ok) openApp(ctx, pkg)
+        TypeSearchService.startInspect(pkg)
+        openApp(ctx, pkg)
     }
 
     fun openAccessibilitySettings(ctx: Context): Boolean = launch(

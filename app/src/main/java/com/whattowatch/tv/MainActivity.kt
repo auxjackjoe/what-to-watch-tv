@@ -787,7 +787,7 @@ fun Details(
     }
 
     fun watch(slot: Int, pkg: String?) {
-        if (pkg == null) onPickApp(slot) else toast(Apps.open(ctx, pkg, t.name, store.method(slot)))
+        if (pkg == null) onPickApp(slot) else toast(Apps.open(ctx, pkg, t.name, store.method(slot), isTv = t.type == "tv"))
     }
 
     Box(Modifier.fillMaxSize()) {

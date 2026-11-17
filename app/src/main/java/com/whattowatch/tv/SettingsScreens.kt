@@ -241,15 +241,20 @@ fun TestAppScreen(slot: Int, store: Store, version: Int, onChanged: () -> Unit, 
             Spacer(Modifier.height(12.dp))
             Text("Troubleshooting", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Text(
-                "Press Inspect: $appName opens its search screen. Wait 3 seconds, press Back, then take a photo of the text that appears below.",
+                "Press Inspect: $appName opens. Go into TV Shows and open its search. Wait 3 seconds on each screen, then press the Home button and reopen What To Watch. Take a photo of the text that appears below. (Recording lasts 2 minutes.)",
                 color = Muted, fontSize = 15.sp, modifier = Modifier.padding(vertical = 6.dp),
             )
-            TvButton("Inspect $appName search screen") {
+            TvButton("Inspect $appName screens") {
                 if (!TypeSearchService.isEnabled(ctx)) toast("Turn on the search typing helper first")
                 else Apps.inspect(ctx, pkg)
             }
             if (dump.isNotEmpty()) {
-                Text(dump, color = Color.White, fontSize = 11.sp, lineHeight = 13.sp, modifier = Modifier.padding(top = 10.dp))
+                val parts = dump.split("\n\n")
+                Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    parts.forEach { part ->
+                        Text(part, color = Color.White, fontSize = 10.sp, lineHeight = 12.sp, modifier = Modifier.weight(1f))
+                    }
+                }
             }
         }
         item {
