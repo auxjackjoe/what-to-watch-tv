@@ -626,9 +626,10 @@ fun Browse(
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val hero = state.hero
+        val heroHeight = maxHeight * 0.5f
         if (hero != null) Backdrop(hero)
         Column(Modifier.fillMaxSize()) {
-            Box(Modifier.fillMaxWidth().height(maxHeight * 0.5f).padding(start = inset + 32.dp)) {
+            Box(Modifier.fillMaxWidth().height(heroHeight).padding(start = inset + 32.dp)) {
                 if (header != null) SectionHeader(header, Modifier.padding(top = 26.dp))
                 if (hero != null) {
                     Column(Modifier.align(Alignment.BottomStart).fillMaxWidth(0.46f).padding(bottom = 4.dp)) {
